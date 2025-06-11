@@ -13,6 +13,7 @@ use http::header::{
 };
 use http::uri::Scheme;
 use http::Uri;
+use hyper::rt::ConnectionStats;
 use hyper_util::client::legacy::connect::HttpConnector;
 #[cfg(feature = "default-tls")]
 use native_tls_crate::TlsConnector;
@@ -315,20 +316,24 @@ impl ClientBuilder {
                     if let Some(nameservers) = config.dns_nameservers {
                         let mut hickory_config = hickory_resolver::config::ResolverConfig::new();
                         for ip in nameservers {
-                            hickory_config.add_name_server(hickory_resolver::config::NameServerConfig {
-                                socket_addr: (ip, DEFAULT_DNS_PORT).into(),
-                                protocol: hickory_resolver::config::Protocol::Udp,
-                                tls_dns_name: None,
-                                trust_negative_responses: false,
-                                bind_addr: None,
-                            });
-                            hickory_config.add_name_server(hickory_resolver::config::NameServerConfig {
-                                socket_addr: (ip, DEFAULT_DNS_PORT).into(),
-                                protocol: hickory_resolver::config::Protocol::Tcp,
-                                tls_dns_name: None,
-                                trust_negative_responses: false,
-                                bind_addr: None,
-                            });
+                            hickory_config.add_name_server(
+                                hickory_resolver::config::NameServerConfig {
+                                    socket_addr: (ip, DEFAULT_DNS_PORT).into(),
+                                    protocol: hickory_resolver::config::Protocol::Udp,
+                                    tls_dns_name: None,
+                                    trust_negative_responses: false,
+                                    bind_addr: None,
+                                },
+                            );
+                            hickory_config.add_name_server(
+                                hickory_resolver::config::NameServerConfig {
+                                    socket_addr: (ip, DEFAULT_DNS_PORT).into(),
+                                    protocol: hickory_resolver::config::Protocol::Tcp,
+                                    tls_dns_name: None,
+                                    trust_negative_responses: false,
+                                    bind_addr: None,
+                                },
+                            );
                         }
 
                         let mut opts = hickory_resolver::config::ResolverOpts::default();
@@ -338,7 +343,7 @@ impl ClientBuilder {
                     }
 
                     Arc::new(resolver)
-                },
+                }
                 #[cfg(not(feature = "hickory-dns"))]
                 true => unreachable!("hickory-dns shouldn't be enabled unless the feature is"),
             };
@@ -1738,12 +1743,11 @@ impl ClientBuilder {
     #[cfg(feature = "hickory-dns")]
     pub fn dns_nameservers<I>(mut self, nameservers: I) -> ClientBuilder
     where
-        I: IntoIterator<Item = IpAddr>
+        I: IntoIterator<Item = IpAddr>,
     {
         self.config.dns_nameservers = Some(nameservers.into_iter().collect());
         self
     }
-
 
     /// Disables the hickory-dns async resolver.
     ///
@@ -2101,6 +2105,10 @@ impl Client {
 
                 in_flight,
                 timeout,
+
+                poll_start: None,
+                last_redirect: None,
+                first_connection: None,
             }),
         }
     }
@@ -2375,6 +2383,10 @@ pin_project! {
         in_flight: ResponseFuture,
         #[pin]
         timeout: Option<Pin<Box<Sleep>>>,
+
+        poll_start: Option<std::time::Instant>,
+        last_redirect: Option<std::time::Instant>,
+        first_connection: Option<ConnectionStats>,
     }
 }
 
@@ -2535,8 +2547,12 @@ impl Future for PendingRequest {
             }
         }
 
+        if self.poll_start.is_none() {
+            self.poll_start = Some(std::time::Instant::now());
+        }
+
         loop {
-            let res = match self.as_mut().in_flight().get_mut() {
+            let (mut stats, res) = match self.as_mut().in_flight().get_mut() {
                 ResponseFuture::Default(r) => match Pin::new(r).poll(cx) {
                     Poll::Ready(Err(e)) => {
                         #[cfg(feature = "http2")]
@@ -2704,6 +2720,13 @@ impl Future for PendingRequest {
                                             .expect("valid request parts");
                                         *req.headers_mut() = headers.clone();
                                         std::mem::swap(self.as_mut().headers(), &mut headers);
+
+                                        if stats.get_connection_stats().connect_start.is_some() {
+                                            self.first_connection =
+                                                Some(stats.get_connection_stats());
+                                        }
+                                        self.last_redirect = Some(std::time::Instant::now());
+
                                         ResponseFuture::Default(self.client.hyper.request(req))
                                     }
                                 };
@@ -2719,12 +2742,29 @@ impl Future for PendingRequest {
                     }
                 }
             }
+            stats.set_last_redirect(self.last_redirect);
 
+            stats.set_poll_start(self.poll_start.unwrap());
+
+            // It could be the case that we encountered some redirects, such that
+            // the final redirect uses a pooled connection (and therefore no longer has
+            // any connection stats,) but our initial connection was not pooled and
+            // therefore has new connection stats; report that one, since we've never
+            // seen it before.  (This creates reporting inaccuracies with > 1 redirect,
+            // where we'll drop any subsequent new connection's stats, but such is life.)
+            if stats.get_connection_stats().connect_start.is_none() {
+                if let Some(cs) = self.first_connection {
+                    stats.set_connection_stats(cs);
+                }
+            }
+
+            stats.set_finish(std::time::Instant::now());
             let res = Response::new(
                 res,
                 self.url.clone(),
                 self.client.accepts,
                 self.timeout.take(),
+                stats,
             );
             return Poll::Ready(Ok(res));
         }

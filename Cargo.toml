@@ -112,8 +112,8 @@ mime_guess = { version = "2.0", default-features = false, optional = true }
 encoding_rs = { version = "0.8", optional = true }
 http-body = "1"
 http-body-util = "0.1"
-hyper = { version = "1", features = ["http1", "client"] }
-hyper-util = { version = "0.1.3", features = ["http1", "client", "client-legacy", "tokio"] }
+hyper = { git = "https://github.com/getsentry/hyper", rev="ee9cad6e9c586742237fe48f1df7dfb1e029a086", features = ["http1", "client"] }
+hyper-util = { git = "https://github.com/getsentry/hyper-util", rev = "3a4d4561c3c970e637f73efe73b02832fe1fcd1d", features = ["http1", "client", "client-legacy", "tokio"] }
 h2 = { version = "0.4", optional = true }
 once_cell = "1"
 log = "0.4"
@@ -127,7 +127,7 @@ ipnet = "2.3"
 rustls-pemfile = { version = "2", optional = true }
 
 ## default-tls
-hyper-tls = { version = "0.6", optional = true }
+hyper-tls = { git = "https://github.com/getsentry/hyper-tls", rev = "b1b9739fad31c0791ca6291f10d8e81c2d3aecec", optional = true }
 native-tls-crate = { version = "0.2.10", optional = true, package = "native-tls" }
 tokio-native-tls = { version = "0.3.0", optional = true }
 
@@ -162,8 +162,8 @@ futures-channel = { version = "0.3", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 env_logger = "0.10"
-hyper = { version = "1.1.0", default-features = false, features = ["http1", "http2", "client", "server"] }
-hyper-util = { version = "0.1", features = ["http1", "http2", "client", "client-legacy", "server-auto", "tokio"] }
+hyper = { git = "https://github.com/getsentry/hyper", rev="ee9cad6e9c586742237fe48f1df7dfb1e029a086", default-features = false, features = ["http1", "http2", "client", "server"] }
+hyper-util = { git = "https://github.com/getsentry/hyper-util", rev = "3a4d4561c3c970e637f73efe73b02832fe1fcd1d", features = ["http1", "http2", "client", "client-legacy", "server-auto", "tokio"] }
 serde = { version = "1.0", features = ["derive"] }
 libflate = "1.0"
 brotli_crate = { package = "brotli", version = "3.3.0" }
