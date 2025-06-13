@@ -394,25 +394,13 @@ impl Connector {
                     .await?;
                     let tls_connector = tokio_native_tls::TlsConnector::from(tls.clone());
                     let mut io = tls_connector
-                        .connect(
-                            host.ok_or("no host in url")?,
-                            TokioIo::new(tunneled, None, None, None, None, None, None, None),
-                        )
+                        .connect(host.ok_or("no host in url")?, TokioIo::new(tunneled, None))
                         .await?;
                     let stats = io.get_mut().get_mut().get_mut().stats();
 
                     return Ok(Conn {
                         inner: self.verbose.wrap(NativeTlsConn {
-                            inner: TokioIo::new(
-                                io,
-                                stats.start_time,
-                                stats.dns_resolve_start,
-                                stats.dns_resolve_end,
-                                stats.connect_start,
-                                stats.connect_end,
-                                stats.tls_connect_start,
-                                stats.tls_connect_end,
-                            ),
+                            inner: TokioIo::new(io, stats),
                         }),
                         is_proxy: false,
                         tls_info: false,
@@ -677,7 +665,7 @@ impl Connection for Conn {
 }
 
 impl Stats for Conn {
-    fn stats(&mut self) -> hyper::rt::ConnectionStats {
+    fn stats(&mut self) -> Option<hyper::rt::ConnectionStats> {
         self.inner.stats()
     }
 }
@@ -769,7 +757,7 @@ where
     // headers end
     buf.extend_from_slice(b"\r\n");
 
-    let mut tokio_conn = TokioIo::new(&mut conn, None, None, None, None, None, None, None);
+    let mut tokio_conn = TokioIo::new(&mut conn, None);
 
     tokio_conn.write_all(&buf).await?;
 
@@ -870,7 +858,7 @@ mod native_tls_conn {
     }
 
     impl<T: AsyncRead + AsyncWrite + Unpin> Stats for NativeTlsConn<T> {
-        fn stats(&mut self) -> hyper::rt::ConnectionStats {
+        fn stats(&mut self) -> Option<hyper::rt::ConnectionStats> {
             self.inner.stats()
         }
     }
@@ -1155,7 +1143,7 @@ mod verbose {
     }
 
     impl<T: Read + Write + Stats + Unpin> Stats for Verbose<T> {
-        fn stats(&mut self) -> hyper::rt::ConnectionStats {
+        fn stats(&mut self) -> Option<hyper::rt::ConnectionStats> {
             unimplemented!("Verbose connector needs an implementation.");
         }
     }
@@ -1359,16 +1347,7 @@ mod tests {
             .build()
             .expect("new rt");
         let f = async move {
-            let tcp = TokioIo::new(
-                TcpStream::connect(&addr).await?,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            );
+            let tcp = TokioIo::new(TcpStream::connect(&addr).await?, None);
             let host = addr.ip().to_string();
             let port = addr.port();
             tunnel(tcp, host, port, ua(), None).await
@@ -1386,16 +1365,7 @@ mod tests {
             .build()
             .expect("new rt");
         let f = async move {
-            let tcp = TokioIo::new(
-                TcpStream::connect(&addr).await?,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            );
+            let tcp = TokioIo::new(TcpStream::connect(&addr).await?, None);
             let host = addr.ip().to_string();
             let port = addr.port();
             tunnel(tcp, host, port, ua(), None).await
@@ -1413,16 +1383,7 @@ mod tests {
             .build()
             .expect("new rt");
         let f = async move {
-            let tcp = TokioIo::new(
-                TcpStream::connect(&addr).await?,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            );
+            let tcp = TokioIo::new(TcpStream::connect(&addr).await?, None);
             let host = addr.ip().to_string();
             let port = addr.port();
             tunnel(tcp, host, port, ua(), None).await
@@ -1446,16 +1407,7 @@ mod tests {
             .build()
             .expect("new rt");
         let f = async move {
-            let tcp = TokioIo::new(
-                TcpStream::connect(&addr).await?,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            );
+            let tcp = TokioIo::new(TcpStream::connect(&addr).await?, None);
             let host = addr.ip().to_string();
             let port = addr.port();
             tunnel(tcp, host, port, ua(), None).await
@@ -1477,16 +1429,7 @@ mod tests {
             .build()
             .expect("new rt");
         let f = async move {
-            let tcp = TokioIo::new(
-                TcpStream::connect(&addr).await?,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            );
+            let tcp = TokioIo::new(TcpStream::connect(&addr).await?, None);
             let host = addr.ip().to_string();
             let port = addr.port();
             tunnel(

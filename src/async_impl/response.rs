@@ -57,8 +57,8 @@ impl Response {
     }
 
     /// Get the request stats for this response
-    pub fn stats(&self) -> RequestStats {
-        self.stats
+    pub fn stats(&self) -> &RequestStats {
+        &self.stats
     }
 
     /// Get the `StatusCode` of this `Response`.
@@ -474,9 +474,7 @@ impl<T: Into<Body>> From<http::Response<T>> for Response {
         Response {
             res,
             url: Box::new(url),
-            // TODO: replace this with a generic "new" constructor.  This impl isn't used in any uptime-related
-            // code, but still would be better to have something less hacky here.
-            stats: RequestStats::new_http2(),
+            stats: RequestStats::empty(),
         }
     }
 }

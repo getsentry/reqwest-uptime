@@ -13,7 +13,7 @@ use http::header::{
 };
 use http::uri::Scheme;
 use http::Uri;
-use hyper::rt::ConnectionStats;
+use hyper::{RedirectStats, RequestStats};
 use hyper_util::client::legacy::connect::HttpConnector;
 #[cfg(feature = "default-tls")]
 use native_tls_crate::TlsConnector;
@@ -2107,8 +2107,7 @@ impl Client {
                 timeout,
 
                 poll_start: None,
-                last_redirect: None,
-                first_connection: None,
+                redirects: vec![],
             }),
         }
     }
@@ -2385,8 +2384,7 @@ pin_project! {
         timeout: Option<Pin<Box<Sleep>>>,
 
         poll_start: Option<std::time::Instant>,
-        last_redirect: Option<std::time::Instant>,
-        first_connection: Option<ConnectionStats>,
+        redirects: Vec<RedirectStats>,
     }
 }
 
@@ -2552,7 +2550,7 @@ impl Future for PendingRequest {
         }
 
         loop {
-            let (mut stats, res) = match self.as_mut().in_flight().get_mut() {
+            let (stats, res) = match self.as_mut().in_flight().get_mut() {
                 ResponseFuture::Default(r) => match Pin::new(r).poll(cx) {
                     Poll::Ready(Err(e)) => {
                         #[cfg(feature = "http2")]
@@ -2721,11 +2719,10 @@ impl Future for PendingRequest {
                                         *req.headers_mut() = headers.clone();
                                         std::mem::swap(self.as_mut().headers(), &mut headers);
 
-                                        if stats.get_connection_stats().connect_start.is_some() {
-                                            self.first_connection =
-                                                Some(stats.get_connection_stats());
-                                        }
-                                        self.last_redirect = Some(std::time::Instant::now());
+                                        self.redirects.push(RedirectStats {
+                                            finished: std::time::Instant::now(),
+                                            connection_stats: stats,
+                                        });
 
                                         ResponseFuture::Default(self.client.hyper.request(req))
                                     }
@@ -2742,29 +2739,18 @@ impl Future for PendingRequest {
                     }
                 }
             }
-            stats.set_last_redirect(self.last_redirect);
 
-            stats.set_poll_start(self.poll_start.unwrap());
-
-            // It could be the case that we encountered some redirects, such that
-            // the final redirect uses a pooled connection (and therefore no longer has
-            // any connection stats,) but our initial connection was not pooled and
-            // therefore has new connection stats; report that one, since we've never
-            // seen it before.  (This creates reporting inaccuracies with > 1 redirect,
-            // where we'll drop any subsequent new connection's stats, but such is life.)
-            if stats.get_connection_stats().connect_start.is_none() {
-                if let Some(cs) = self.first_connection {
-                    stats.set_connection_stats(cs);
-                }
-            }
-
-            stats.set_finish(std::time::Instant::now());
             let res = Response::new(
                 res,
                 self.url.clone(),
                 self.client.accepts,
                 self.timeout.take(),
-                stats,
+                RequestStats {
+                    http_stats: stats,
+                    redirects: self.redirects.clone(),
+                    poll_start: self.poll_start.unwrap(),
+                    finish: std::time::Instant::now(),
+                },
             );
             return Poll::Ready(Ok(res));
         }
