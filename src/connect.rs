@@ -3,6 +3,7 @@ use http::header::HeaderValue;
 use http::uri::{Authority, Scheme};
 use http::Uri;
 use hyper::rt::{Read, ReadBufCursor, Stats, Write};
+use hyper::stats::RequestId;
 use hyper_util::client::legacy::connect::{Connected, Connection};
 #[cfg(any(feature = "socks", feature = "__tls"))]
 use hyper_util::rt::TokioIo;
@@ -271,7 +272,12 @@ impl Connector {
         })
     }
 
-    async fn connect_with_maybe_proxy(self, dst: Uri, is_proxy: bool) -> Result<Conn, BoxError> {
+    async fn connect_with_maybe_proxy(
+        self,
+        dst: Uri,
+        req_id: RequestId,
+        is_proxy: bool,
+    ) -> Result<Conn, BoxError> {
         match self.inner {
             #[cfg(not(feature = "__tls"))]
             Inner::Http(mut http) => {
@@ -295,7 +301,7 @@ impl Connector {
 
                 let tls_connector = tokio_native_tls::TlsConnector::from(tls.clone());
                 let mut http = hyper_tls::HttpsConnector::from((http, tls_connector));
-                let io = http.call(dst).await?;
+                let io = http.call((dst, req_id)).await?;
 
                 if let hyper_tls::MaybeHttpsStream::Https(stream) = io {
                     if !self.nodelay {
@@ -359,6 +365,7 @@ impl Connector {
     async fn connect_via_proxy(
         self,
         dst: Uri,
+        req_id: RequestId,
         proxy_scheme: ProxyScheme,
     ) -> Result<Conn, BoxError> {
         log::debug!("proxy({proxy_scheme:?}) intercepts '{dst:?}'");
@@ -382,7 +389,7 @@ impl Connector {
                     let http = http.clone();
                     let tls_connector = tokio_native_tls::TlsConnector::from(tls.clone());
                     let mut http = hyper_tls::HttpsConnector::from((http, tls_connector));
-                    let conn = http.call(proxy_dst).await?;
+                    let conn = http.call((proxy_dst, req_id)).await?;
                     log::trace!("tunneling HTTPS over proxy");
                     let tunneled = tunnel(
                         conn,
@@ -446,7 +453,7 @@ impl Connector {
             Inner::Http(_) => (),
         }
 
-        self.connect_with_maybe_proxy(proxy_dst, true).await
+        self.connect_with_maybe_proxy(proxy_dst, req_id, true).await
     }
 
     pub fn set_keepalive(&mut self, dur: Option<Duration>) {
@@ -486,7 +493,7 @@ where
     }
 }
 
-impl Service<Uri> for Connector {
+impl Service<(Uri, RequestId)> for Connector {
     type Response = Conn;
     type Error = BoxError;
     type Future = Connecting;
@@ -495,20 +502,20 @@ impl Service<Uri> for Connector {
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, dst: Uri) -> Self::Future {
+    fn call(&mut self, (dst, req_id): (Uri, RequestId)) -> Self::Future {
         log::debug!("starting new connection: {dst:?}");
         let timeout = self.timeout;
         for prox in self.proxies.iter() {
             if let Some(proxy_scheme) = prox.intercept(&dst) {
                 return Box::pin(with_timeout(
-                    self.clone().connect_via_proxy(dst, proxy_scheme),
+                    self.clone().connect_via_proxy(dst, req_id, proxy_scheme),
                     timeout,
                 ));
             }
         }
 
         Box::pin(with_timeout(
-            self.clone().connect_with_maybe_proxy(dst, false),
+            self.clone().connect_with_maybe_proxy(dst, req_id, false),
             timeout,
         ))
     }
