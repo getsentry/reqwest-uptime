@@ -25,7 +25,7 @@ async fn stats_request_timeout() {
         .timeout(Duration::from_millis(500))
         .build()
         .unwrap();
-    let req_id = req.req_id();
+    let req_id = req.req_id().clone();
 
     let res = client.execute(req).await;
 
@@ -81,7 +81,7 @@ async fn stats_connect_timeout() {
         .timeout(Duration::from_millis(1000))
         .build()
         .unwrap();
-    let req_id = req.req_id();
+    let req_id = req.req_id().clone();
     let res = client.execute(req).await;
 
     let err = res.unwrap_err();

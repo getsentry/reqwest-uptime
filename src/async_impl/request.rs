@@ -127,8 +127,8 @@ impl Request {
     }
 
     /// Gets the unique request id for this request.
-    pub fn req_id(&self) -> RequestId {
-        self.req_id
+    pub fn req_id(&self) -> &RequestId {
+        &self.req_id
     }
 
     /// Attempt to clone the request.

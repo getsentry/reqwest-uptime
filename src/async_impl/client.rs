@@ -2082,7 +2082,7 @@ impl Client {
             _ => {
                 let mut req = builder.body(body).expect("valid request parts");
                 *req.headers_mut() = headers.clone();
-                ResponseFuture::Default(self.inner.hyper.request(req, req_id))
+                ResponseFuture::Default(self.inner.hyper.request(req, req_id.clone()))
             }
         };
 
@@ -2563,7 +2563,7 @@ impl Future for PendingRequest {
                         .as_micros(),
                 );
 
-                hyper::stats::get_request_stats(self.req_id)
+                hyper::stats::get_request_stats(&self.req_id)
                     .set_poll_start(self.poll_start.unwrap(), self.poll_start_timestamp.unwrap());
             }
 
@@ -2753,8 +2753,8 @@ impl Future for PendingRequest {
 
                                         let next_req_id = hyper::stats::next_request_id();
 
-                                        hyper::stats::get_request_stats(self.req_id)
-                                            .set_redirect(next_req_id)
+                                        hyper::stats::get_request_stats(&self.req_id)
+                                            .set_redirect(next_req_id.clone())
                                             .set_finished(now)
                                             .set_status_code(res.status().as_u16())
                                             .set_url(
@@ -2764,7 +2764,7 @@ impl Future for PendingRequest {
                                             .set_request_body_size(request_body_size)
                                             .set_certificate(certificate.clone());
 
-                                        self.req_id = next_req_id;
+                                        self.req_id = next_req_id.clone();
                                         self.poll_start = None;
                                         self.poll_start_timestamp = None;
 
@@ -2801,7 +2801,7 @@ impl Future for PendingRequest {
                 .flatten()
                 .unwrap_or(0) as u32;
 
-            let mut req_stats = hyper::stats::get_request_stats(self.req_id);
+            let mut req_stats = hyper::stats::get_request_stats(&self.req_id);
 
             req_stats
                 .set_poll_start(self.poll_start.unwrap(), self.poll_start_timestamp.unwrap())
