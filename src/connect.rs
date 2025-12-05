@@ -2,7 +2,7 @@
 use http::header::HeaderValue;
 use http::uri::{Authority, Scheme};
 use http::Uri;
-use hyper::rt::{Read, ReadBufCursor, Stats, Write};
+use hyper::rt::{Read, ReadBufCursor, Write};
 use hyper::stats::RequestId;
 use hyper_util::client::legacy::connect::{Connected, Connection};
 #[cfg(any(feature = "socks", feature = "__tls"))]
@@ -400,14 +400,13 @@ impl Connector {
                     )
                     .await?;
                     let tls_connector = tokio_native_tls::TlsConnector::from(tls.clone());
-                    let mut io = tls_connector
-                        .connect(host.ok_or("no host in url")?, TokioIo::new(tunneled, None))
+                    let io = tls_connector
+                        .connect(host.ok_or("no host in url")?, TokioIo::new(tunneled))
                         .await?;
-                    let stats = io.get_mut().get_mut().get_mut().stats();
 
                     return Ok(Conn {
                         inner: self.verbose.wrap(NativeTlsConn {
-                            inner: TokioIo::new(io, stats),
+                            inner: TokioIo::new(io),
                         }),
                         is_proxy: false,
                         tls_info: false,
@@ -621,11 +620,11 @@ impl TlsInfoFactory for hyper_rustls::MaybeHttpsStream<TokioIo<tokio::net::TcpSt
 }
 
 pub(crate) trait AsyncConn:
-    Read + Write + Stats + Connection + Send + Sync + Unpin + 'static
+    Read + Write + Connection + Send + Sync + Unpin + 'static
 {
 }
 
-impl<T: Read + Write + Stats + Connection + Send + Sync + Unpin + 'static> AsyncConn for T {}
+impl<T: Read + Write + Connection + Send + Sync + Unpin + 'static> AsyncConn for T {}
 
 #[cfg(feature = "__tls")]
 trait AsyncConnWithInfo: AsyncConn + TlsInfoFactory {}
@@ -668,12 +667,6 @@ impl Connection for Conn {
         }
         #[cfg(not(feature = "__tls"))]
         connected
-    }
-}
-
-impl Stats for Conn {
-    fn stats(&mut self) -> Option<hyper::rt::ConnectionStats> {
-        self.inner.stats()
     }
 }
 
@@ -764,7 +757,7 @@ where
     // headers end
     buf.extend_from_slice(b"\r\n");
 
-    let mut tokio_conn = TokioIo::new(&mut conn, None);
+    let mut tokio_conn = TokioIo::new(&mut conn);
 
     tokio_conn.write_all(&buf).await?;
 
@@ -804,7 +797,7 @@ fn tunnel_eof() -> BoxError {
 #[cfg(feature = "default-tls")]
 mod native_tls_conn {
     use super::TlsInfoFactory;
-    use hyper::rt::{Read, ReadBufCursor, Stats, Write};
+    use hyper::rt::{Read, ReadBufCursor, Write};
     use hyper_tls::MaybeHttpsStream;
     use hyper_util::client::legacy::connect::{Connected, Connection};
     use hyper_util::rt::TokioIo;
@@ -861,12 +854,6 @@ mod native_tls_conn {
             }
             #[cfg(not(feature = "native-tls-alpn"))]
             connected
-        }
-    }
-
-    impl<T: AsyncRead + AsyncWrite + Unpin> Stats for NativeTlsConn<T> {
-        fn stats(&mut self) -> Option<hyper::rt::ConnectionStats> {
-            self.inner.stats()
         }
     }
 
@@ -1111,7 +1098,7 @@ mod socks {
 }
 
 mod verbose {
-    use hyper::rt::{Read, ReadBufCursor, Stats, Write};
+    use hyper::rt::{Read, ReadBufCursor, Write};
     use hyper_util::client::legacy::connect::{Connected, Connection};
     use std::cmp::min;
     use std::fmt;
@@ -1146,12 +1133,6 @@ mod verbose {
     impl<T: Connection + Read + Write + Unpin> Connection for Verbose<T> {
         fn connected(&self) -> Connected {
             self.inner.connected()
-        }
-    }
-
-    impl<T: Read + Write + Stats + Unpin> Stats for Verbose<T> {
-        fn stats(&mut self) -> Option<hyper::rt::ConnectionStats> {
-            unimplemented!("Verbose connector needs an implementation.");
         }
     }
 
@@ -1354,7 +1335,7 @@ mod tests {
             .build()
             .expect("new rt");
         let f = async move {
-            let tcp = TokioIo::new(TcpStream::connect(&addr).await?, None);
+            let tcp = TokioIo::new(TcpStream::connect(&addr).await?);
             let host = addr.ip().to_string();
             let port = addr.port();
             tunnel(tcp, host, port, ua(), None).await
@@ -1372,7 +1353,7 @@ mod tests {
             .build()
             .expect("new rt");
         let f = async move {
-            let tcp = TokioIo::new(TcpStream::connect(&addr).await?, None);
+            let tcp = TokioIo::new(TcpStream::connect(&addr).await?);
             let host = addr.ip().to_string();
             let port = addr.port();
             tunnel(tcp, host, port, ua(), None).await
@@ -1390,7 +1371,7 @@ mod tests {
             .build()
             .expect("new rt");
         let f = async move {
-            let tcp = TokioIo::new(TcpStream::connect(&addr).await?, None);
+            let tcp = TokioIo::new(TcpStream::connect(&addr).await?);
             let host = addr.ip().to_string();
             let port = addr.port();
             tunnel(tcp, host, port, ua(), None).await
@@ -1414,7 +1395,7 @@ mod tests {
             .build()
             .expect("new rt");
         let f = async move {
-            let tcp = TokioIo::new(TcpStream::connect(&addr).await?, None);
+            let tcp = TokioIo::new(TcpStream::connect(&addr).await?);
             let host = addr.ip().to_string();
             let port = addr.port();
             tunnel(tcp, host, port, ua(), None).await
@@ -1436,7 +1417,7 @@ mod tests {
             .build()
             .expect("new rt");
         let f = async move {
-            let tcp = TokioIo::new(TcpStream::connect(&addr).await?, None);
+            let tcp = TokioIo::new(TcpStream::connect(&addr).await?);
             let host = addr.ip().to_string();
             let port = addr.port();
             tunnel(

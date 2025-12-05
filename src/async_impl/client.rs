@@ -7,7 +7,6 @@ use std::{collections::HashMap, convert::TryInto, net::SocketAddr};
 use std::{fmt, str};
 
 use crate::tls::TlsInfo;
-use crate::{RedirectStats, RequestStats};
 use bytes::Bytes;
 use http::header::{
     Entry, HeaderMap, HeaderValue, ACCEPT, ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_LENGTH,
@@ -2111,7 +2110,6 @@ impl Client {
 
                 poll_start: None,
                 poll_start_timestamp: None,
-                redirects: vec![],
             }),
         }
     }
@@ -2389,7 +2387,6 @@ pin_project! {
 
         poll_start: Option<std::time::Instant>,
         poll_start_timestamp: Option<u128>,
-        redirects: Vec<RedirectStats>,
         req_id: RequestId,
     }
 }
@@ -2570,7 +2567,7 @@ impl Future for PendingRequest {
                     .set_poll_start(self.poll_start.unwrap(), self.poll_start_timestamp.unwrap());
             }
 
-            let (stats, res) = match self.as_mut().in_flight().get_mut() {
+            let res = match self.as_mut().in_flight().get_mut() {
                 ResponseFuture::Default(r) => match Pin::new(r).poll(cx) {
                     Poll::Ready(Err(e)) => {
                         #[cfg(feature = "http2")]
@@ -2747,9 +2744,6 @@ impl Future for PendingRequest {
                                             .unwrap_or(0)
                                             as u32;
                                         let now = Instant::now();
-                                        let poll_start = self.poll_start.unwrap();
-                                        let poll_start_timestamp =
-                                            self.poll_start_timestamp.unwrap();
 
                                         let certificate = res
                                             .extensions()
@@ -2769,18 +2763,6 @@ impl Future for PendingRequest {
                                             )
                                             .set_request_body_size(request_body_size)
                                             .set_certificate(certificate.clone());
-
-                                        self.redirects.push(RedirectStats::new(
-                                            now,
-                                            poll_start,
-                                            poll_start_timestamp,
-                                            stats,
-                                            res.status().as_u16(),
-                                            try_uri(&old_url)
-                                                .expect("Uri already successfully parsed."),
-                                            request_body_size,
-                                            certificate,
-                                        ));
 
                                         self.req_id = next_req_id;
                                         self.poll_start = None;
@@ -2834,17 +2816,6 @@ impl Future for PendingRequest {
                 self.url.clone(),
                 self.client.accepts,
                 self.timeout.take(),
-                RequestStats::new(
-                    stats,
-                    self.redirects.clone(),
-                    self.poll_start.unwrap(),
-                    self.poll_start_timestamp.unwrap(),
-                    finish,
-                    try_uri(&self.url).expect("Uri already successfully parsed."),
-                    status,
-                    request_body_size,
-                    certificate,
-                ),
             );
             return Poll::Ready(Ok(res));
         }
