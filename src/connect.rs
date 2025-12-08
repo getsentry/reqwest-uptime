@@ -281,7 +281,7 @@ impl Connector {
         match self.inner {
             #[cfg(not(feature = "__tls"))]
             Inner::Http(mut http) => {
-                let io = http.call(dst).await?;
+                let io = http.call((dst, req_id)).await?;
                 Ok(Conn {
                     inner: self.verbose.wrap(io),
                     is_proxy,
