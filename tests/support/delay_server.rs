@@ -65,7 +65,6 @@ impl Server {
                             let (stream, _) = res.unwrap();
                             let io = hyper_util::rt::TokioIo::new(stream);
 
-
                             let handle = tokio::spawn({
                                 let connection_shutdown_rx = connection_shutdown_rx.clone();
                                 let func = func.clone();

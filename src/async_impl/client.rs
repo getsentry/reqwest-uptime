@@ -2,10 +2,11 @@
 use std::any::Any;
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 use std::{collections::HashMap, convert::TryInto, net::SocketAddr};
 use std::{fmt, str};
 
+use crate::tls::TlsInfo;
 use bytes::Bytes;
 use http::header::{
     Entry, HeaderMap, HeaderValue, ACCEPT, ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_LENGTH,
@@ -13,6 +14,7 @@ use http::header::{
 };
 use http::uri::Scheme;
 use http::Uri;
+use hyper::stats::RequestId;
 use hyper_util::client::legacy::connect::HttpConnector;
 #[cfg(feature = "default-tls")]
 use native_tls_crate::TlsConnector;
@@ -35,6 +37,8 @@ use crate::connect::Connector;
 use crate::cookie;
 #[cfg(feature = "hickory-dns")]
 use crate::dns::hickory::HickoryDnsResolver;
+use hickory_resolver;
+
 use crate::dns::{gai::GaiResolver, DnsResolverWithOverrides, DynResolver, Resolve};
 use crate::error;
 use crate::into_url::try_uri;
@@ -53,6 +57,7 @@ use quinn::TransportConfig;
 use quinn::VarInt;
 
 type HyperResponseFuture = hyper_util::client::legacy::ResponseFuture;
+const DEFAULT_DNS_PORT: u16 = 53;
 
 /// An asynchronous `Client` to make Requests with.
 ///
@@ -153,7 +158,9 @@ struct Config {
     cookie_store: Option<Arc<dyn cookie::CookieStore>>,
     hickory_dns: bool,
     #[cfg(feature = "hickory-dns")]
-    ip_filter: fn(std::net::IpAddr) -> bool,
+    dns_nameservers: Option<Vec<IpAddr>>,
+    #[cfg(feature = "hickory-dns")]
+    ip_filter: fn(IpAddr) -> bool,
     error: Option<crate::Error>,
     https_only: bool,
     #[cfg(feature = "http3")]
@@ -267,6 +274,8 @@ impl ClientBuilder {
                 #[cfg(feature = "http3")]
                 quic_send_window: None,
                 dns_resolver: None,
+                #[cfg(feature = "hickory-dns")]
+                dns_nameservers: None,
             },
         }
     }
@@ -303,7 +312,39 @@ impl ClientBuilder {
             let mut resolver: Arc<dyn Resolve> = match config.hickory_dns {
                 false => Arc::new(GaiResolver::new()),
                 #[cfg(feature = "hickory-dns")]
-                true => Arc::new(HickoryDnsResolver::new(config.ip_filter)),
+                true => {
+                    let mut resolver = HickoryDnsResolver::new(config.ip_filter);
+                    if let Some(nameservers) = config.dns_nameservers {
+                        let mut hickory_config = hickory_resolver::config::ResolverConfig::new();
+                        for ip in nameservers {
+                            hickory_config.add_name_server(
+                                hickory_resolver::config::NameServerConfig {
+                                    socket_addr: (ip, DEFAULT_DNS_PORT).into(),
+                                    protocol: hickory_resolver::config::Protocol::Udp,
+                                    tls_dns_name: None,
+                                    trust_negative_responses: false,
+                                    bind_addr: None,
+                                },
+                            );
+                            hickory_config.add_name_server(
+                                hickory_resolver::config::NameServerConfig {
+                                    socket_addr: (ip, DEFAULT_DNS_PORT).into(),
+                                    protocol: hickory_resolver::config::Protocol::Tcp,
+                                    tls_dns_name: None,
+                                    trust_negative_responses: false,
+                                    bind_addr: None,
+                                },
+                            );
+                        }
+
+                        let mut opts = hickory_resolver::config::ResolverOpts::default();
+                        opts.use_hosts_file = false;
+
+                        resolver = resolver.with_config(hickory_config, opts);
+                    }
+
+                    Arc::new(resolver)
+                }
                 #[cfg(not(feature = "hickory-dns"))]
                 true => unreachable!("hickory-dns shouldn't be enabled unless the feature is"),
             };
@@ -1691,6 +1732,24 @@ impl ClientBuilder {
         self
     }
 
+    /// Configure custom DNS nameservers for this client when using hickory_dns
+    ///
+    /// # Example
+    /// ```
+    /// # use std::net::{IpAddr, Ipv4Addr};
+    /// let client = reqwest::Client::builder()
+    ///     .dns_nameservers(vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))])
+    ///     .build()?;
+    /// ```
+    #[cfg(feature = "hickory-dns")]
+    pub fn dns_nameservers<I>(mut self, nameservers: I) -> ClientBuilder
+    where
+        I: IntoIterator<Item = IpAddr>,
+    {
+        self.config.dns_nameservers = Some(nameservers.into_iter().collect());
+        self
+    }
+
     /// Disables the hickory-dns async resolver.
     ///
     /// This method exists even if the optional `hickory-dns` feature is not enabled.
@@ -1952,7 +2011,7 @@ impl Client {
     }
 
     pub(super) fn execute_request(&self, req: Request) -> Pending {
-        let (method, url, mut headers, body, timeout, version) = req.pieces();
+        let (method, url, mut headers, body, timeout, version, req_id) = req.pieces();
         if url.scheme() != "http" && url.scheme() != "https" {
             return Pending::new_err(error::url_bad_scheme(url));
         }
@@ -2023,7 +2082,7 @@ impl Client {
             _ => {
                 let mut req = builder.body(body).expect("valid request parts");
                 *req.headers_mut() = headers.clone();
-                ResponseFuture::Default(self.inner.hyper.request(req))
+                ResponseFuture::Default(self.inner.hyper.request(req, req_id.clone()))
             }
         };
 
@@ -2038,6 +2097,7 @@ impl Client {
                 url,
                 headers,
                 body: reusable,
+                req_id,
 
                 urls: Vec::new(),
 
@@ -2047,6 +2107,9 @@ impl Client {
 
                 in_flight,
                 timeout,
+
+                poll_start: None,
+                poll_start_timestamp: None,
             }),
         }
     }
@@ -2321,6 +2384,10 @@ pin_project! {
         in_flight: ResponseFuture,
         #[pin]
         timeout: Option<Pin<Box<Sleep>>>,
+
+        poll_start: Option<std::time::Instant>,
+        poll_start_timestamp: Option<u128>,
+        req_id: RequestId,
     }
 }
 
@@ -2399,7 +2466,12 @@ impl PendingRequest {
                     .body(body)
                     .expect("valid request parts");
                 *req.headers_mut() = self.headers.clone();
-                ResponseFuture::Default(self.client.hyper.request(req))
+                // TODO klochek If we ever implement retries, this is where we generate the new id.
+                ResponseFuture::Default(
+                    self.client
+                        .hyper
+                        .request(req, hyper::stats::next_request_id()),
+                )
             }
         };
 
@@ -2482,6 +2554,19 @@ impl Future for PendingRequest {
         }
 
         loop {
+            if self.poll_start.is_none() {
+                self.poll_start = Some(std::time::Instant::now());
+                self.poll_start_timestamp = Some(
+                    SystemTime::now()
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .unwrap_or(Duration::from_secs(0))
+                        .as_micros(),
+                );
+
+                hyper::stats::get_request_stats(&self.req_id)
+                    .set_poll_start(self.poll_start.unwrap(), self.poll_start_timestamp.unwrap());
+            }
+
             let res = match self.as_mut().in_flight().get_mut() {
                 ResponseFuture::Default(r) => match Pin::new(r).poll(cx) {
                     Poll::Ready(Err(e)) => {
@@ -2601,7 +2686,7 @@ impl Future for PendingRequest {
                                     loc,
                                 )));
                             }
-
+                            let old_url = self.url.clone();
                             self.url = loc;
                             let mut headers =
                                 std::mem::replace(self.as_mut().headers(), HeaderMap::new());
@@ -2650,7 +2735,42 @@ impl Future for PendingRequest {
                                             .expect("valid request parts");
                                         *req.headers_mut() = headers.clone();
                                         std::mem::swap(self.as_mut().headers(), &mut headers);
-                                        ResponseFuture::Default(self.client.hyper.request(req))
+
+                                        let request_body_size = self
+                                            .body
+                                            .as_ref()
+                                            .map(|o| o.as_ref().map(|b| b.len()))
+                                            .flatten()
+                                            .unwrap_or(0)
+                                            as u32;
+                                        let now = Instant::now();
+
+                                        let certificate = res
+                                            .extensions()
+                                            .get::<TlsInfo>()
+                                            .and_then(|info| info.peer_certificate())
+                                            .and_then(|bytes| Some(bytes.to_vec()));
+
+                                        let next_req_id = hyper::stats::next_request_id();
+
+                                        hyper::stats::get_request_stats(&self.req_id)
+                                            .set_redirect(next_req_id.clone())
+                                            .set_finished(now)
+                                            .set_status_code(res.status().as_u16())
+                                            .set_url(
+                                                try_uri(&old_url)
+                                                    .expect("Uri already successfully parsed."),
+                                            )
+                                            .set_request_body_size(request_body_size)
+                                            .set_certificate(certificate.clone());
+
+                                        self.req_id = next_req_id.clone();
+                                        self.poll_start = None;
+                                        self.poll_start_timestamp = None;
+
+                                        ResponseFuture::Default(
+                                            self.client.hyper.request(req, next_req_id),
+                                        )
                                     }
                                 };
 
@@ -2665,6 +2785,31 @@ impl Future for PendingRequest {
                     }
                 }
             }
+
+            let finish = Instant::now();
+
+            let certificate = res
+                .extensions()
+                .get::<TlsInfo>()
+                .and_then(|info| info.peer_certificate())
+                .and_then(|bytes| Some(bytes.to_vec()));
+            let status = res.status().as_u16();
+            let request_body_size = self
+                .body
+                .as_ref()
+                .map(|o| o.as_ref().map(|b| b.len()))
+                .flatten()
+                .unwrap_or(0) as u32;
+
+            let mut req_stats = hyper::stats::get_request_stats(&self.req_id);
+
+            req_stats
+                .set_poll_start(self.poll_start.unwrap(), self.poll_start_timestamp.unwrap())
+                .set_finished(finish)
+                .set_status_code(status)
+                .set_url(try_uri(&self.url).expect("Uri already successfully parsed."))
+                .set_request_body_size(request_body_size)
+                .set_certificate(certificate.clone());
 
             let res = Response::new(
                 res,

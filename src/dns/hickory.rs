@@ -1,6 +1,8 @@
-//! DNS resolution via the [hickory-resolver](https://github.com/hickory-dns/hickory-dns) crate
-
-use hickory_resolver::{lookup_ip::LookupIpIntoIter, system_conf, TokioAsyncResolver};
+use hickory_resolver::{
+    config::{ResolverConfig, ResolverOpts},
+    lookup_ip::LookupIpIntoIter,
+    system_conf, TokioAsyncResolver,
+};
 use once_cell::sync::OnceCell;
 
 use std::io;
@@ -17,6 +19,7 @@ pub(crate) struct HickoryDnsResolver {
     /// construction of the resolver.
     state: Arc<OnceCell<TokioAsyncResolver>>,
     filter: fn(std::net::IpAddr) -> bool,
+    config: Option<(ResolverConfig, ResolverOpts)>,
 }
 
 struct SocketAddrs {
@@ -29,7 +32,13 @@ impl HickoryDnsResolver {
         Self {
             state: Default::default(),
             filter,
+            config: None,
         }
+    }
+
+    pub fn with_config(mut self, config: ResolverConfig, opts: ResolverOpts) -> Self {
+        self.config = Some((config, opts));
+        self
     }
 }
 
@@ -38,15 +47,26 @@ impl Resolve for HickoryDnsResolver {
         let resolver = self.clone();
         Box::pin(async move {
             let filter = resolver.filter;
-            let resolver = resolver.state.get_or_try_init(new_resolver)?;
+            let resolver = resolver
+                .state
+                .get_or_try_init(|| new_resolver(resolver.config))?;
 
             let start = std::time::Instant::now();
             let lookup = resolver.lookup_ip(name.as_str()).await?;
-            if rand::random::<f32>() < 0.01 {
+            let elapsed = start.elapsed();
+
+            let hostname = name.as_str();
+            // XXX: Hack to make sure we get all dns logs for sending to vector
+            let is_vector_uc = hostname.contains("vector-uc-pops");
+            let should_log = is_vector_uc || elapsed.as_secs() >= 1 || rand::random::<f32>() < 0.01;
+
+            if should_log {
+                let resolved_ips: Vec<std::net::IpAddr> = lookup.iter().collect();
                 log::warn!(
-                    "DNS lookup for {} took {:?}",
-                    name.as_str(),
-                    start.elapsed()
+                    "DNS lookup for {} took {:?} → {:?}",
+                    hostname,
+                    elapsed,
+                    resolved_ips
                 );
             }
 
@@ -77,18 +97,19 @@ impl Iterator for SocketAddrs {
     }
 }
 
-/// Create a new resolver with the default configuration,
-/// which reads from `/etc/resolve.conf`.
-fn new_resolver() -> io::Result<TokioAsyncResolver> {
-    let (config, opts) = system_conf::read_system_conf().map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::Other,
-            format!("error reading DNS system conf: {e}"),
-        )
-    })?;
+fn new_resolver(
+    resolver_config: Option<(ResolverConfig, ResolverOpts)>,
+) -> io::Result<TokioAsyncResolver> {
+    let (config, mut opts) = match resolver_config {
+        Some((config, opts)) => (config, opts),
+        None => system_conf::read_system_conf().map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!("error reading DNS system conf: {e}"),
+            )
+        })?,
+    };
 
-    let mut mut_ops = opts.clone();
-    mut_ops.cache_size = 500_000; // 500k entries
-
-    Ok(TokioAsyncResolver::tokio(config, mut_ops))
+    opts.cache_size = 500_000; // 500k entries
+    Ok(TokioAsyncResolver::tokio(config, opts))
 }

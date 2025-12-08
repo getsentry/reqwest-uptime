@@ -238,14 +238,6 @@
 //! [cargo-features]: https://doc.rust-lang.org/stable/cargo/reference/manifest.html#the-features-section
 //! [sponsor]: https://seanmonstar.com/sponsor
 
-#[cfg(all(feature = "http3", not(reqwest_unstable)))]
-compile_error!(
-    "\
-    The `http3` feature is unstable, and requires the \
-    `RUSTFLAGS='--cfg reqwest_unstable'` environment variable to be set.\
-"
-);
-
 macro_rules! if_wasm {
     ($($item:item)*) => {$(
         #[cfg(target_arch = "wasm32")]
@@ -259,11 +251,12 @@ macro_rules! if_hyper {
         $item
     )*}
 }
-
 pub use http::header;
 pub use http::Method;
 pub use http::{StatusCode, Version};
 pub use url::Url;
+
+pub use hyper::stats::{RedirectStats, RequestStats};
 
 // universal mods
 #[macro_use]
